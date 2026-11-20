@@ -1,4 +1,7 @@
 import JSZip from 'jszip';
+import * as pdfjsLib from 'pdfjs-dist';
+import pdfWorker from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
+pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
 import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import './style.css';
@@ -9,8 +12,8 @@ app.innerHTML = `
     <header class="topbar"><div class="brand"><span class="brand-mark">✦</span><span>CACA</span></div><span class="top-note">College Academic Companion & Assistant</span></header>
     <section class="hero"><div class="eyebrow">YOUR STUDY PARTNER ✧</div><h1>Ubah PPT kuliah menjadi<br><span>modul belajar yang jelas.</span></h1><p>Upload slide dosen, dapatkan ringkasan lengkap, tabel pembanding, latihan vignette HOTS, dan PDF yang siap dipelajari.</p></section>
     <section class="upload-card" id="uploadCard">
-      <div class="upload-icon">⇧</div><h2>Masukkan materi kuliahmu</h2><p class="muted">Unggah file PowerPoint (.pptx). Bisa pilih beberapa file sekaligus.</p>
-      <label class="dropzone" id="dropzone"><input id="fileInput" type="file" accept=".pptx" multiple hidden/><span class="upload-emoji">📚</span><strong>Tarik file ke sini atau <span>pilih file</span></strong><small>Format .pptx · Beberapa file sekaligus</small></label>
+      <div class="upload-icon">⇧</div><h2>Masukkan materi kuliahmu</h2><p class="muted">Unggah file PowerPoint (.pptx) atau PDF. Bisa pilih beberapa file sekaligus.</p>
+      <label class="dropzone" id="dropzone"><input id="fileInput" type="file" accept=".pptx,.pdf,application/pdf" multiple hidden/><span class="upload-emoji">📚</span><strong>Tarik file ke sini atau <span>pilih file</span></strong><small>Format .pptx dan .pdf · Beberapa file sekaligus</small></label>
       <div id="fileList" class="file-list"></div>
       <div class="field-row"><label for="moduleName">Nama modul (opsional)</label><input id="moduleName" placeholder="Contoh: Blok Neurologi — Radicular Syndrome" /></div>
       <button id="generateBtn" class="primary" disabled>✨ Buat ringkasan & PDF</button>
@@ -31,7 +34,7 @@ const result = document.getElementById('result');
 let chosenFiles = [];
 let generatedPdfBlob = null;
 
-function setFiles(files){ chosenFiles = [...files].filter(f=>f.name.toLowerCase().endsWith('.pptx'));
+function setFiles(files){ chosenFiles = [...files].filter(f=>/\.(pptx|pdf)$/i.test(f.name));
   filesBox.innerHTML = chosenFiles.map((f,i)=>`<div class="file-chip"><span>📄</span><span>${escapeHtml(f.name)}</span><small>${(f.size/1024/1024).toFixed(1)} MB</small><button aria-label="hapus" data-remove="${i}">×</button></div>`).join('');
   generateBtn.disabled = chosenFiles.length === 0;
 }
@@ -49,6 +52,33 @@ async function extractPptx(file){
   for(const path of slidePaths){const xml=await zip.files[path].async('text'); const texts=[...xml.matchAll(/<a:t>([\s\S]*?)<\/a:t>/g)].map(m=>decodeXml(m[1])).filter(Boolean); slides.push({slide:path.match(/slide(\d+)/)[1],text:texts.join(' ')});}
   return {name:file.name,slides};
 }
+async function extractPdf(file) {
+  const pdf = await pdfjsLib.getDocument({
+    data: await file.arrayBuffer()
+  }).promise;
+
+  const slides = [];
+
+  for (let pageNo = 1; pageNo <= pdf.numPages; pageNo++) {
+    const page = await pdf.getPage(pageNo);
+    const content = await page.getTextContent();
+
+    const text = content.items
+      .map(item => item.str || '')
+      .join(' ')
+      .trim();
+
+    slides.push({
+      slide: String(pageNo),
+      text
+    });
+  }
+
+  return {
+    name: file.name,
+    slides
+  };
+}
 function decodeXml(s){return s.replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"').replace(/&apos;/g,"'");}
 
 generateBtn.addEventListener('click',async()=>{
@@ -56,10 +86,31 @@ generateBtn.addEventListener('click',async()=>{
   result.classList.add('hidden');statusBox.classList.remove('hidden');generateBtn.disabled=true;
   setStatus('Membaca slide PowerPoint…','Mengambil teks slide dan menyusunnya sesuai urutan.');
   try{
-    const sources=[]; for(const f of chosenFiles){sources.push(await extractPptx(f));}
-    const totalSlides=sources.reduce((n,s)=>n+s.slides.length,0);
-    if(!totalSlides)throw new Error('Tidak berhasil menemukan teks di PPT. Pastikan file berisi slide teks dan berformat .pptx.');
-    setStatus('AI sedang menyusun modul belajar…',`Menganalisis ${totalSlides} slide. Menyusun materi, tabel, dan 15 vignette HOTS.`);
+   const sources = [];
+
+for (const f of chosenFiles) {
+  if (/\.pdf$/i.test(f.name)) {
+    sources.push(await extractPdf(f));
+  } else {
+    sources.push(await extractPptx(f));
+  }
+}
+
+const totalSlides = sources.reduce(
+  (n, s) => n + s.slides.length,
+  0
+);
+
+if (!totalSlides) {
+  throw new Error(
+    'Tidak berhasil membaca teks file PPT/PDF. Pastikan file berisi teks yang dapat dibaca.'
+  );
+}
+
+setStatus(
+  'AI sedang menyusun modul belajar…',
+  `Menganalisis ${totalSlides} slide/halaman. Menyusun materi, tabel, dan 15 vignette HOTS.`
+);
     const response=await fetch('/api/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sources,moduleName:document.getElementById('moduleName').value})});
     const payload=await response.json(); if(!response.ok)throw new Error(payload.error||'Gagal membuat ringkasan.');
     setStatus('Menata PDF…','Menata heading, tabel, soal, dan pembahasan agar mudah dibaca.');
